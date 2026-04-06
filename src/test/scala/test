@@ -1,0 +1,420 @@
+package com.example;
+import com.google.gson.Gson;
+
+import java.io.BufferedReader;
+import java.io.FileReader;
+import java.io.IOException;
+import java.io.OutputStream;
+import java.net.ServerSocket;
+import java.net.Socket;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.Map;
+
+public class CSVTCPSender extends Sender implements Runnable {
+
+
+    public CSVTCPSender(String localDataPath, String address, int port, String seperator, int streamingDelay) {
+        super(localDataPath, port, seperator, streamingDelay);
+    }
+
+    public BufferedReader readCSVData(){
+
+        BufferedReader bufferedReader = null;
+
+        try {
+
+            bufferedReader = new BufferedReader(new FileReader(this.getDataPath()));
+
+        } catch (IOException exception) {
+            System.out.println(exception);
+        }
+
+        return bufferedReader;
+    }
+
+    public Map<String, String> toJsonString(String line, ArrayList<String> headers){
+
+        String[] values = line.split(this.getSeparator());
+
+        Map<String, String> jsonMap = new HashMap<>();
+
+        for (int i = 0; i < headers.size() && i < values.length; i++){
+            jsonMap.put(headers.get(i), values[i]);
+        }
+
+        return jsonMap;
+    }
+
+    @Override
+    public void run(){
+
+        BufferedReader data = this.readCSVData();
+        ArrayList<String> headers = this.getDataColsNames(data);
+
+        if (data == null){
+            System.out.println("Invalid data path!");
+            return;
+        }
+
+        String line;
+
+        try {
+
+            System.out.println("Sending data...");
+
+            while ((line = data.readLine()) != null) {
+
+                Gson gson = new Gson();
+
+                Map<String, String> event = this.toJsonString(line, headers);
+
+                String jsonLine = gson.toJson(event);
+
+                OutputStream out = this.getSocket().getOutputStream();
+                out.write((jsonLine + "\n").getBytes(StandardCharsets.UTF_8));
+                out.flush();
+
+                int streamingDelay = this.getStreamingDelay();
+
+                Thread.sleep(streamingDelay);
+
+            }
+        } catch (IOException exception){
+            System.out.println(exception.getMessage());
+        } catch (InterruptedException e) {
+            throw new RuntimeException(e);
+        }
+    }
+}
+
+package com.example;
+
+import java.io.BufferedReader;
+import java.io.FileReader;
+import java.io.IOException;
+import java.net.ServerSocket;
+import java.net.Socket;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.Map;
+
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.Path;
+import org.apache.parquet.example.data.Group;
+import org.apache.parquet.hadoop.ParquetReader;
+import org.apache.parquet.hadoop.example.GroupReadSupport;
+
+
+public class Sender{
+
+    private Socket socket;
+    private int port;
+    private String dataPath;
+    private String separator;
+    private int streamingDelay;
+
+    public Sender(String dataPath, int port, String separator, int streamingDelay) {
+        this.dataPath = dataPath;
+        this.port = port;
+        this.separator = separator;
+        this.streamingDelay = streamingDelay;
+
+        try {
+            ServerSocket serverSocket = new ServerSocket(this.port);
+            System.out.println("Waiting for Spark to connect on port " + this.port + " ...");
+
+            this.socket = serverSocket.accept();
+
+            System.out.println("Spark connected!");
+        } catch (IOException ioException) {
+            System.out.println(ioException.getMessage());
+        }
+    }
+
+    public Socket getSocket(){
+        return this.socket;
+    }
+
+    public int getPort() { return this.port; }
+
+    public String getSeparator() { return this.separator; }
+
+    public String getDataPath() { return this.dataPath; }
+
+    public int getStreamingDelay() { return this.streamingDelay; }
+
+    public ArrayList<String> getDataColsNames(BufferedReader data) {
+
+        ArrayList<String> cols = null;
+
+        try {
+            String line = data.readLine();
+
+            cols = new ArrayList<>();
+
+            for (String col : line.split(",")) {
+                String cleanCol = col.trim()
+                        .toLowerCase()
+                        .replaceAll(" ", "_");
+                cols.add(cleanCol);
+            }
+
+        } catch (IOException exception) {
+            System.out.println(exception.getMessage());
+        }
+
+        return cols;
+
+    }
+
+}
+
+my spark code :
+        import org.apache.spark.sql.SparkSession
+import org.apache.spark._
+import org.apache.spark.sql.types.StructType
+import org.apache.spark.streaming._
+import org.apache.spark.sql.types._
+import org.apache.spark.sql.functions._
+import org.apache.spark.sql.streaming.Trigger
+
+object Main {
+def main(args: Array[String]): Unit = {
+
+
+val schema = new StructType()
+        .add("dr_no", LongType)
+        .add("date_rptd", StringType)
+        .add("date_occ", StringType)
+        .add("time_occ", LongType)
+        .add("area", LongType)
+        .add("area_name", StringType)
+        .add("rpt_dist_no", LongType)
+        .add("part_1_2", LongType)
+        .add("crm_cd", LongType)
+        .add("crm_cd_desc", StringType)
+        .add("mocodes", StringType)
+        .add("vict_age", LongType)
+        .add("vict_sex", StringType)
+        .add("vict_descent", StringType)
+        .add("premis_cd", DoubleType)
+        .add("premis_desc", StringType)
+        .add("weapon_used_cd", DoubleType)
+        .add("weapon_desc", StringType)
+        .add("status", StringType)
+        .add("status_desc", StringType)
+        .add("crm_cd_1", DoubleType)
+        .add("crm_cd_2", DoubleType)
+        .add("crm_cd_3", DoubleType)
+        .add("crm_cd_4", DoubleType)
+        .add("location", StringType)
+        .add("cross_street", StringType)
+        .add("lat", DoubleType)
+        .add("lon", DoubleType)
+
+val spark = SparkSession
+        .builder()
+        .appName("CrimeETLStreaming")
+        .master("local[*]")
+        .getOrCreate()
+
+    spark.sparkContext.setLogLevel("ERROR")
+
+val df = spark.readStream
+        .format("socket")
+        .option("host", "localhost")
+        .option("port", "1212")
+        .load()
+
+val parsedDf = df.select(
+        from_json(col("value"), schema).alias("data")
+).select("data.*")
+//      .filter(col("dr_no").isNotNull)
+
+var dfProcessed = parsedDf
+
+dfProcessed = dfProcessed
+        .withColumn("date_rptd", to_date(col("date_rptd"), "MM/dd/yyyy hh:mm:ss a"))
+        .withColumn("date_occ", to_date(col("date_occ"), "MM/dd/yyyy hh:mm:ss a"))
+        .withColumn("mocodes", coalesce(col("mocodes"), lit("none")))
+        .withColumn("vict_sex", coalesce(col("vict_sex"), lit("unknown")))
+        .withColumn("vict_descent", coalesce(col("vict_descent"), lit("unknown")))
+        .withColumn("weapon_desc", coalesce(col("weapon_desc"), lit("none")))
+        .withColumn("cross_street", coalesce(col("cross_street"), lit("none")))
+
+
+val int_cols: Array[String] = dfProcessed.dtypes.collect {
+    case (colName, "LongType") => colName
+}
+
+val double_cols: Array[String] = dfProcessed.dtypes.collect {
+    case (colName, "DoubleType") => colName
+}
+
+val str_cols: Array[String] = dfProcessed.dtypes.collect {
+    case (colName, "StringType") => colName
+}
+
+    int_cols.foreach {
+    colName: String => {
+            dfProcessed = dfProcessed.withColumn(
+                    colName,
+                    coalesce(col(colName), lit(0))
+            )
+    }
+}
+
+    double_cols.foreach {
+    colName: String => {
+    if (!Seq("lat", "lon").contains(colName)) {
+        dfProcessed = dfProcessed.withColumn(
+                colName,
+                coalesce(col(colName), lit(0.0))
+        )
+    }
+      }
+}
+
+    str_cols.foreach {
+    colName: String => {
+            dfProcessed = dfProcessed.withColumn(
+                    colName,
+                    regexp_replace(
+                            trim(
+                                    regexp_replace(col(colName).cast("string"), "\u00A0", " ")
+                            ),
+                            "\\s+",
+                            " "
+                    )
+            )
+
+    }
+}
+
+
+
+
+val query = parsedDf.writeStream
+        .format("console")
+        .trigger(Trigger.ProcessingTime("10 seconds"))
+        .outputMode("update")
+        .start()
+        .awaitTermination()
+
+  }
+          }
+
+
+<class 'pandas.DataFrame'>
+RangeIndex: 1004894 entries, 0 to 1004893
+Data columns (total 28 columns):
+ #   Column          Non-Null Count    Dtype
+---  ------          --------------    -----
+ 0   DR_NO           1004894 non-null  int64
+ 1   Date Rptd       1004894 non-null  str
+ 2   DATE OCC        1004894 non-null  str
+ 3   TIME OCC        1004894 non-null  int64
+ 4   AREA            1004894 non-null  int64
+ 5   AREA NAME       1004894 non-null  str
+ 6   Rpt Dist No     1004894 non-null  int64
+ 7   Part 1-2        1004894 non-null  int64
+ 8   Crm Cd          1004894 non-null  int64
+ 9   Crm Cd Desc     1004894 non-null  str
+ 10  Mocodes         853296 non-null   str
+ 11  Vict Age        1004894 non-null  int64
+ 12  Vict Sex        860263 non-null   str
+ 13  Vict Descent    860251 non-null   str
+ 14  Premis Cd       1004878 non-null  float64
+ 15  Premis Desc     1004306 non-null  str
+ 16  Weapon Used Cd  327216 non-null   float64
+ 17  Weapon Desc     327216 non-null   str
+ 18  Status          1004893 non-null  str
+ 19  Status Desc     1004894 non-null  str
+ 20  Crm Cd 1        1004883 non-null  float64
+ 21  Crm Cd 2        69154 non-null    float64
+ 22  Crm Cd 3        2314 non-null     float64
+ 23  Crm Cd 4        64 non-null       float64
+ 24  LOCATION        1004894 non-null  str
+ 25  Cross Street    154228 non-null   str
+ 26  LAT             1004894 non-null  float64
+ 27  LON             1004894 non-null  float64
+dtypes: float64(8), int64(7), str(13)
+memory usage: 214.7 MB
+
+
+processing that i was using before with pandas :
+import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
+from airflow.utils.log.logging_mixin import LoggingMixin
+
+
+def process_data(input_file_path: str, output_file_path: str, **context):
+
+    log = LoggingMixin().log
+
+    ti = context['ti']
+
+    df = pd.read_csv(input_file_path,  encoding="utf-8")
+
+    df['Date Rptd'] = pd.to_datetime(
+        df['Date Rptd'],
+        format='%m/%d/%Y %I:%M:%S %p',
+        errors='coerce'
+    ).dt.date
+
+    df['DATE OCC'] = pd.to_datetime(
+        df['DATE OCC'],
+        format='%m/%d/%Y %I:%M:%S %p',
+        errors='coerce'
+    ).dt.date
+
+    int_cols = df.select_dtypes(include='int64').columns
+    float_cols = df.select_dtypes(include='float64').columns
+    str_cols = df.select_dtypes(include='string').columns
+
+    for col_name in int_cols:
+
+        if col_name not in ["LAT", "LON"]:
+            df[col_name] = df[col_name].fillna(0).astype('int64')
+
+        else:
+            df[col_name] = df[col_name].fillna(0.0).astype('float64')
+
+    print('int cols processed')
+
+    for col_name in float_cols:
+        df[col_name] = df[col_name].fillna(0).astype('int64')
+
+    print('float cols processed')
+
+    for col_name in str_cols:
+        df[col_name] = ((((df[col_name]
+                           .astype(str))
+                          .str.replace('\u00A0', ' ', regex=False))
+                         .str.strip())
+                        .str.replace(r'\s+', ' ', regex=True))
+
+    print('str cols processed')
+
+
+    df.columns = df.columns.str.replace(' ', '-')
+    print(f" ' ' are replaced with '-'")
+
+    try:
+
+        table = pa.Table.from_pandas(df)
+
+        pq.write_table(table, output_file_path)
+        print("file saved")
+
+    except Exception as e:
+        print("file didn't saved", e)
+
+    ti.xcom_push(key='output_path', value=output_file_path)
+    log.info("Parquet saved.")
+
+what i should modify
