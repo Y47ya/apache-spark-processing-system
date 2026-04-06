@@ -29,9 +29,7 @@ object Main {
       .add("crm_cd", StringType)
       .add("crm_cd_desc", StringType)
       .add("mocodes", StringType)
-      .add("vict_age", StringType)
-      .add("vict_sex", StringType)
-      .add("vict_descent", StringType)
+      .add("victid", StringType)
       .add("premis_cd", StringType)
       .add("premis_desc", StringType)
       .add("weapon_used_cd", StringType)
@@ -57,12 +55,10 @@ object Main {
   }
 
   private def getReadStream(spark: SparkSession): DataStreamReader = {
-
     spark.readStream
       .format("socket")
       .option("host", "localhost")
       .option("port", "1212")
-
   }
 
   private def cleanData(parsedDf: DataFrame, schema: StructType): DataFrame = {
@@ -71,7 +67,7 @@ object Main {
 
     val intCols = Seq(
       "dr_no", "time_occ", "area", "rpt_dist_no", "part_1_2",
-      "crm_cd", "vict_age", "premis_cd", "weapon_used_cd",
+      "crm_cd", "victid", "premis_cd", "weapon_used_cd",
       "crm_cd_1", "crm_cd_2", "crm_cd_3", "crm_cd_4"
     )
     val doubleCols = Seq("lat", "lon")
@@ -79,7 +75,6 @@ object Main {
     intCols.foreach { colName =>
       dfProcessed = dfProcessed.withColumn(colName, coalesce(col(colName).cast(LongType), lit(0L)))
     }
-
     doubleCols.foreach { colName =>
       dfProcessed = dfProcessed.withColumn(colName, coalesce(col(colName).cast(DoubleType), lit(0.0)))
     }
@@ -88,18 +83,10 @@ object Main {
       .withColumn("date_rptd", to_date(col("date_rptd"), "MM/dd/yyyy hh:mm:ss a"))
       .withColumn("date_occ", to_date(col("date_occ"), "MM/dd/yyyy hh:mm:ss a"))
       .withColumn("mocodes", coalesce(col("mocodes"), lit("none")))
-      .withColumn("vict_sex", coalesce(col("vict_sex"), lit("unknown")))
-      .withColumn("vict_descent", coalesce(col("vict_descent"), lit("unknown")))
       .withColumn("weapon_desc", coalesce(col("weapon_desc"), lit("none")))
       .withColumn("cross_street", coalesce(col("cross_street"), lit("none")))
-      .withColumn("vict_sex",
-        when(col("vict_sex").contains("H"), lit("H"))
-          .when(col("vict_sex").contains("F"), lit("F"))
-          .otherwise("U")
-      )
 
     val dateCols = Seq("date_rptd", "date_occ")
-
     val stringCols = schema.fields
       .filter(f => !intCols.contains(f.name) && !doubleCols.contains(f.name) && !dateCols.contains(f.name))
       .map(_.name)
@@ -123,16 +110,15 @@ object Main {
     val weaponsTable = df.select(col("weapon_used_cd").alias("weaponid"), col("weapon_desc").alias("weapondesc")).dropDuplicates()
 
     val crimesLong = df.select(col("dr_no"),
-      expr("""
-        stack(4, crm_cd_1, crm_cd_2, crm_cd_3, crm_cd_4) as CrmCd
-      """)).filter(col("CrmCd").isNotNull)
+        expr("stack(4, crm_cd_1, crm_cd_2, crm_cd_3, crm_cd_4) as CrmCd"))
+      .filter(col("CrmCd").isNotNull && col("CrmCd") =!= 0L)
 
     val crimesTable = df.select(col("crm_cd").alias("crmcd"), col("crm_cd_desc").alias("crmcddesc"), col("part_1_2").alias("part1_2")).dropDuplicates()
     val crimeReportCrimes = crimesLong.select(col("dr_no"), col("CrmCd").alias("crmcd")).dropDuplicates()
 
-    val victimsTable = df.select(col("dr_no"), col("vict_age").alias("age"), col("vict_sex").alias("sex"), col("vict_descent").alias("descent")).dropDuplicates()
     val crimeReports = df.select(
       col("dr_no"),
+      col("victid"),
       col("date_rptd").alias("daterptd"),
       col("date_occ").alias("dateocc"),
       col("time_occ").alias("timeocc"),
@@ -151,35 +137,53 @@ object Main {
 
     println("Data transformation complete.")
     Map(
-      "areas" -> areasTable,
-      "status" -> statusTable,
-      "crimes" -> crimesTable,
-      "weapons" -> weaponsTable,
-      "crimereports" -> crimeReports,
-      "crimereportcrimes" -> crimeReportCrimes,
-      "victims" -> victimsTable
+      "areas"             -> areasTable,
+      "status"            -> statusTable,
+      "crimes"            -> crimesTable,
+      "weapons"           -> weaponsTable,
+      "crimereports"      -> crimeReports,
+      "crimereportcrimes" -> crimeReportCrimes
     )
   }
 
   private def getProperties: Map[String, String] = {
-
     Map(
-      "url" -> "jdbc:postgresql://localhost:5432/spark_crime_db",
-      "user" -> "postgres",
+      "url"      -> "jdbc:postgresql://localhost:5432/spark_crime_db",
+      "user"     -> "postgres",
       "password" -> "postgres"
     )
-
   }
 
   private def setProperty(user: String, password: String): Properties = {
-
     val pgProperties = new Properties()
     pgProperties.setProperty("user", getProperties("user"))
     pgProperties.setProperty("password", getProperties("password"))
     pgProperties.setProperty("driver", "org.postgresql.Driver")
-
     pgProperties
+  }
 
+  // ── helper: read a single column from the DB ─────────────────────────────
+  private def readFromDB(spark: SparkSession, table: String, column: String): DataFrame = {
+    spark.read
+      .format("jdbc")
+      .option("url", url)
+      .option("dbtable", table)
+      .option("user", user)
+      .option("password", password)
+      .load()
+      .select(column)
+  }
+
+  // ── helper: insert missing keys via ON CONFLICT DO NOTHING ───────────────
+  private def insertMissing(sql: String): Unit = {
+    val conn = DriverManager.getConnection(url, user, password)
+    conn.setAutoCommit(false)
+    val stmt = conn.createStatement()
+    stmt.execute(sql)
+    stmt.execute("COMMIT;")
+    conn.commit()
+    stmt.close()
+    conn.close()
   }
 
   private def writeTable(df: DataFrame, tableName: String, primaryKey: String): Unit = {
@@ -188,23 +192,25 @@ object Main {
     val pgProperties = setProperty(user, password)
     val tempTable = s"${tableName}_staging"
 
-    df.write.mode(SaveMode.Append).jdbc(url, tempTable, pgProperties)
+    // ✅ Overwrite so staging table is always recreated with the current schema
+    df.write.mode(SaveMode.Overwrite).jdbc(url, tempTable, pgProperties)
     println(s"Data written to staging table: $tempTable")
 
     val conn = DriverManager.getConnection(url, user, password)
     conn.setAutoCommit(false)
     val stmt = conn.createStatement()
     val columns = df.columns
+
     val setClause = primaryKey match {
-      case "dr_no, crmcd" =>
-        val pkColumns = primaryKey.split(",").map(_.trim)
+      case pk if pk.contains(",") =>
+        val pkColumns = pk.split(",").map(_.trim)
         columns.filterNot(pkColumns.contains).map(c => s"$c = EXCLUDED.$c").mkString(", ")
-      case _ =>
-        columns.filter(_ != primaryKey).map(c => s"$c = EXCLUDED.$c").mkString(", ")
+      case pk =>
+        columns.filter(_ != pk).map(c => s"$c = EXCLUDED.$c").mkString(", ")
     }
 
     val query = tableName match {
-      case "victims" | "crimereportcrimes" =>
+      case "crimereportcrimes" =>
         s"INSERT INTO $tableName (${columns.mkString(", ")}) SELECT ${columns.mkString(", ")} FROM $tempTable ON CONFLICT ($primaryKey) DO NOTHING;"
       case _ =>
         s"INSERT INTO $tableName (${columns.mkString(", ")}) SELECT ${columns.mkString(", ")} FROM $tempTable ON CONFLICT ($primaryKey) DO UPDATE SET $setClause;"
@@ -213,8 +219,8 @@ object Main {
     stmt.execute(query)
     stmt.execute("COMMIT;")
     println(s"Table $tableName inserted into main table.")
-    stmt.execute(s"DELETE FROM $tempTable;")
-    println(s"Staging table $tempTable cleared.")
+    stmt.execute(s"DROP TABLE IF EXISTS $tempTable;")
+    println(s"Staging table $tempTable dropped.")
 
     conn.commit()
     stmt.close()
@@ -223,211 +229,109 @@ object Main {
   }
 
   private def ensureDefaultFKValues(spark: SparkSession): Unit = {
-
     val defaults = Seq(
-      ("areas", "areaid", "0"),
+      ("areas",   "areaid",   "0"),
       ("weapons", "weaponid", "0"),
-      ("status", "statusid", "'unknown'")
+      ("status",  "statusid", "'unknown'"),
+      ("crimes",  "crmcd",    "0")
     )
-
     defaults.foreach { case (table, column, value) =>
-      val query =
-        s"""
-           |INSERT INTO $table ($column)
+      insertMissing(
+        s"""INSERT INTO $table ($column)
            |SELECT $value
-           |WHERE NOT EXISTS (
-           |  SELECT 1 FROM $table WHERE $column = $value
-           |)
-       """.stripMargin
-
-      val conn = java.sql.DriverManager.getConnection(url, user, password)
-      conn.setAutoCommit(false)
-      val stmt = conn.createStatement()
-      stmt.execute(query)
-      stmt.execute("COMMIT;")
-      conn.commit()
-      stmt.close()
-      conn.close()
+           |WHERE NOT EXISTS (SELECT 1 FROM $table WHERE $column = $value)
+         """.stripMargin
+      )
     }
   }
 
-  def checkAreasFK(childDF: DataFrame, parentDF: DataFrame, fkColumn: String): Unit = {
+  // ── FK checks — all read from DB, all use ON CONFLICT DO NOTHING ─────────
 
-    val missingKeys = childDF.select(fkColumn).distinct()
-      .except(parentDF.select(fkColumn))
-
+  private def checkAreasFK(childDF: DataFrame, fkColumn: String, spark: SparkSession): Unit = {
+    val parentKeys = readFromDB(spark, "areas", "areaid")
+    val missingKeys = childDF.select(fkColumn).distinct().except(parentKeys)
     if (missingKeys.count() > 0) {
-
-      val placeholders = missingKeys
-        .withColumn("areaname", lit("unknown"))
-
-      placeholders.write
-        .format("jdbc")
-        .option("url", url)
-        .option("dbtable", "AREAS")
-        .option("user", user)
-        .option("password", password)
-        .mode("append")
-        .save()
+      missingKeys.collect().foreach { row =>
+        insertMissing(s"INSERT INTO areas (areaid, areaname) VALUES (${row.getLong(0)}, 'unknown') ON CONFLICT (areaid) DO NOTHING;")
+      }
     }
   }
 
-  private def checkStatusFK(childDF: DataFrame, parentDF: DataFrame, fkColumn: String): Unit = {
-
-    val missingKeys = childDF.select(fkColumn).distinct()
-      .except(parentDF.select(fkColumn))
-
+  private def checkStatusFK(childDF: DataFrame, fkColumn: String, spark: SparkSession): Unit = {
+    val parentKeys = readFromDB(spark, "status", "statusid")
+    val missingKeys = childDF.select(fkColumn).distinct().except(parentKeys)
     if (missingKeys.count() > 0) {
-
-      val placeholders = missingKeys
-        .withColumn("status_desc", lit("unknown"))
-
-      placeholders.write
-        .format("jdbc")
-        .option("url", url)
-        .option("dbtable", "status")
-        .option("user", user)
-        .option("password", password)
-        .mode("append")
-        .save()
+      missingKeys.collect().foreach { row =>
+        insertMissing(s"INSERT INTO status (statusid, statusdesc) VALUES ('${row.getString(0)}', 'unknown') ON CONFLICT (statusid) DO NOTHING;")
+      }
     }
-
   }
 
-  private def checkWeaponsFK(childDF: DataFrame, parentDF: DataFrame, fkColumn: String): Unit = {
-
-    val missingKeys = childDF.select(fkColumn).distinct()
-      .except(parentDF.select(fkColumn))
-
+  private def checkWeaponsFK(childDF: DataFrame, fkColumn: String, spark: SparkSession): Unit = {
+    val parentKeys = readFromDB(spark, "weapons", "weaponid")
+    val missingKeys = childDF.select(fkColumn).distinct().except(parentKeys)
     if (missingKeys.count() > 0) {
-
-      val placeholders = missingKeys
-        .withColumn("weapon_desc", lit("unknown"))
-
-      placeholders.write
-        .format("jdbc")
-        .option("url", url)
-        .option("dbtable", "weapons")
-        .option("user", user)
-        .option("password", password)
-        .mode("append")
-        .save()
+      missingKeys.collect().foreach { row =>
+        insertMissing(s"INSERT INTO weapons (weaponid, weapondesc) VALUES (${row.getLong(0)}, 'unknown') ON CONFLICT (weaponid) DO NOTHING;")
+      }
     }
+  }
 
+  private def checkCrimesFK(childDF: DataFrame, fkColumn: String, spark: SparkSession): Unit = {
+    val parentKeys = readFromDB(spark, "crimes", "crmcd")
+    val missingKeys = childDF.select(fkColumn).distinct().except(parentKeys)
+    if (missingKeys.count() > 0) {
+      missingKeys.collect().foreach { row =>
+        insertMissing(s"INSERT INTO crimes (crmcd, crmcddesc, part1_2) VALUES (${row.getLong(0)}, 'unknown', 'unknown') ON CONFLICT (crmcd) DO NOTHING;")
+      }
+    }
   }
 
   private def checkCrimeReportsFK(childDF: DataFrame, fkColumn: String, spark: SparkSession): Unit = {
-
-    val parentKeys = spark.read
-      .format("jdbc")
-      .option("url", url)
-      .option("dbtable", "crimereports")
-      .option("user", user)
-      .option("password", password)
-      .load()
-      .select("dr_no")
-
-    val missingKeys = childDF.select(fkColumn).distinct()
-      .except(parentKeys)
-
+    val parentKeys = readFromDB(spark, "crimereports", "dr_no")
+    val missingKeys = childDF.select(fkColumn).distinct().except(parentKeys)
     if (missingKeys.count() > 0) {
-
-      val placeholders = missingKeys
-        .withColumn("daterptd", lit(null).cast(DateType))
-        .withColumn("dateocc", lit(null).cast(DateType))
-        .withColumn("timeocc", lit(0L))
-        .withColumn("areaid", lit(0L))
-        .withColumn("rptdistno", lit(0L))
-        .withColumn("premisid", lit(0L))
-        .withColumn("premisdesc", lit("unknown"))
-        .withColumn("location", lit("unknown"))
-        .withColumn("lat", lit(0.0))
-        .withColumn("lon", lit(0.0))
-        .withColumn("statusid", lit("unknown"))
-        .withColumn("mocodes", lit("none"))
-        .withColumn("weaponid", lit(0L))
-
-      placeholders.write
-        .format("jdbc")
-        .option("url", url)
-        .option("dbtable", "crimereports")
-        .option("user", user)
-        .option("password", password)
-        .mode("append")
-        .save()
+      missingKeys.collect().foreach { row =>
+        insertMissing(
+          s"""INSERT INTO crimereports (dr_no, victid, daterptd, dateocc, timeocc, areaid, rptdistno, premisid, premisdesc, location, crossstreet, lat, lon, statusid, mocodes, weaponid)
+             |VALUES (${row.getLong(0)}, 0, NULL, NULL, 0, 0, 0, 0, 'unknown', 'unknown', 'none', 0.0, 0.0, 'unknown', 'none', 0)
+             |ON CONFLICT (dr_no) DO NOTHING;
+           """.stripMargin
+        )
+      }
     }
-  }
-
-  private def checkCrimesFK(childDF: DataFrame, parentDF: DataFrame, fkColumn: String): Unit = {
-
-    val missingKeys = childDF.select(fkColumn).distinct()
-      .except(parentDF.select(fkColumn))
-
-    if (missingKeys.count() > 0) {
-
-      val placeholders = missingKeys
-        .withColumn("crmcddesc", lit("unknown"))
-        .withColumn("part1_2", lit("unknown"))
-
-      placeholders.write
-        .format("jdbc")
-        .option("url", url)
-        .option("dbtable", "crimes")
-        .option("user", user)
-        .option("password", password)
-        .mode("append")
-        .save()
-    }
-
   }
 
   private def ingestDataWithFKChecks(tables: Map[String, DataFrame], spark: SparkSession): Unit = {
     println("Starting FK checks...")
 
-//    checkAreasFK(tables("crimereports"), tables("areas"), "areaid")
-//    checkStatusFK(tables("crimereports"), tables("status"), "statusid")
-//    checkWeaponsFK(tables("crimereports"), tables("weapons"), "weaponid")
-//    checkCrimesFK(tables("crimereportcrimes"), tables("crimes"), "crmcd")
-
-    checkCrimeReportsFK(tables("victims"), "dr_no", spark)
+    checkAreasFK(tables("crimereports"),      "areaid",  spark)
+    checkStatusFK(tables("crimereports"),     "statusid", spark)
+    checkWeaponsFK(tables("crimereports"),    "weaponid", spark)
+    checkCrimesFK(tables("crimereportcrimes"), "crmcd",   spark)
     checkCrimeReportsFK(tables("crimereportcrimes"), "dr_no", spark)
 
     println("FK checks completed.")
 
-    if (tables("areas").count() > 0)
-      writeTable(tables("areas"), "areas", "areaid")
-
-    if (tables("status").count() > 0)
-      writeTable(tables("status"), "status", "statusid")
-
-    if (tables("crimes").count() > 0)
-      writeTable(tables("crimes"), "crimes", "crmcd")
-
-    if (tables("weapons").count() > 0)
-      writeTable(tables("weapons"), "weapons", "weaponid")
-
-    if (tables("crimereports").count() > 0)
-      writeTable(tables("crimereports"), "crimereports", "dr_no")
-
-    if (tables("victims").count() > 0)
-      writeTable(tables("victims"), "victims", "dr_no, age, sex, descent")
-
-    if (tables("crimereportcrimes").count() > 0)
-      writeTable(tables("crimereportcrimes"), "crimereportcrimes", "dr_no, crmcd")
+    if (tables("areas").count() > 0)             writeTable(tables("areas"),             "areas",             "areaid")
+    if (tables("status").count() > 0)            writeTable(tables("status"),            "status",            "statusid")
+    if (tables("crimes").count() > 0)            writeTable(tables("crimes"),            "crimes",            "crmcd")
+    if (tables("weapons").count() > 0)           writeTable(tables("weapons"),           "weapons",           "weaponid")
+    if (tables("crimereports").count() > 0)      writeTable(tables("crimereports"),      "crimereports",      "dr_no")
+    if (tables("crimereportcrimes").count() > 0) writeTable(tables("crimereportcrimes"), "crimereportcrimes", "dr_no, crmcd")
   }
 
   def main(args: Array[String]): Unit = {
-
     val schema = getSchema
-    val spark = getSpark
+    val spark  = getSpark
     spark.sparkContext.setLogLevel("ERROR")
 
-    val data = getReadStream(spark).load()
+    val data     = getReadStream(spark).load()
     val parsedDf = data.select(from_json(col("value"), schema).alias("data")).select("data.*")
 
     parsedDf.writeStream
       .foreachBatch { (batchDf: DataFrame, batchId: Long) =>
-        val df = cleanData(batchDf, schema)
+        val df     = cleanData(batchDf, schema)
         val tables = transformData(df)
         ensureDefaultFKValues(spark)
         ingestDataWithFKChecks(tables, spark)
@@ -436,5 +340,4 @@ object Main {
       .start()
       .awaitTermination()
   }
-
 }
