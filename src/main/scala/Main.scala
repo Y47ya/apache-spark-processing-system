@@ -162,7 +162,6 @@ object Main {
     pgProperties
   }
 
-  // ── helper: read a single column from the DB ─────────────────────────────
   private def readFromDB(spark: SparkSession, table: String, column: String): DataFrame = {
     spark.read
       .format("jdbc")
@@ -174,7 +173,6 @@ object Main {
       .select(column)
   }
 
-  // ── helper: insert missing keys via ON CONFLICT DO NOTHING ───────────────
   private def insertMissing(sql: String): Unit = {
     val conn = DriverManager.getConnection(url, user, password)
     conn.setAutoCommit(false)
@@ -192,7 +190,6 @@ object Main {
     val pgProperties = setProperty(user, password)
     val tempTable = s"${tableName}_staging"
 
-    // ✅ Overwrite so staging table is always recreated with the current schema
     df.write.mode(SaveMode.Overwrite).jdbc(url, tempTable, pgProperties)
     println(s"Data written to staging table: $tempTable")
 
@@ -245,7 +242,6 @@ object Main {
     }
   }
 
-  // ── FK checks — all read from DB, all use ON CONFLICT DO NOTHING ─────────
 
   private def checkAreasFK(childDF: DataFrame, fkColumn: String, spark: SparkSession): Unit = {
     val parentKeys = readFromDB(spark, "areas", "areaid")
