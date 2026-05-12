@@ -6,7 +6,7 @@
 
 This project implements a **real-time ETL data pipeline** for processing crime data from Los Angeles.
 
-Unlike traditional batch pipelines, this system includes a **custom Java socket-based data source** that streams crime records in real time.
+Unlike traditional batch pipelines, this system includes a **custom Java socket-based data source** that streams crime records in real time — [Data Streaming System](https://github.com/Y47ya/data-streaming-system).
 
 The pipeline processes data using **Apache Spark (Scala)**, stores it in **PostgreSQL**, and visualizes insights using **Metabase**.
 
